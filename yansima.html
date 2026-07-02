@@ -24,10 +24,6 @@
     height:100%;
     overflow:hidden;
   }
-  @font-face{
-    font-family:'IBM Plex Mono';
-    src:local('IBM Plex Mono');
-  }
   .mono{font-family:'IBM Plex Mono', 'Courier New', monospace; letter-spacing:0.02em;}
 
   #app{position:relative; width:100vw; height:100vh; display:flex; flex-direction:column;}
@@ -153,7 +149,6 @@
   }
   .ctrlBtn:hover{color:var(--text); border-color:var(--mesh-dim);}
   .ctrlBtn.active{color:var(--bg); background:var(--mesh); border-color:var(--mesh);}
-  .swatch{width:16px; height:16px; border-radius:50%; display:inline-block; vertical-align:middle; margin-right:8px; border:1px solid rgba(255,255,255,0.3);}
 
   #colorRow{display:flex; gap:6px; align-items:center; pointer-events:auto;}
   .colorDot{
@@ -199,7 +194,7 @@
       </svg>
       <div class="eyebrow">Biyometrik Arayüz</div>
       <h1>YANSIMA</h1>
-      <p class="lede">Kameran, yüzünü ve ellerini gerçek zamanlı olarak bir nokta ağına dönüştürür. Parmak uçlarınla havada çizim yap, jestlerle şekiller oluştur.</p>
+      <p class="lede">Kameran, yüzünü ve ellerini gerçek zamanlı olarak yoğun bir nokta ağına dönüştürür. İşaret parmağınla havada çizim yap, jestlerle şekiller oluştur.</p>
       <button class="btn primary" id="startBtn">Kamerayı Etkinleştir</button>
       <div class="gate-status" id="gateStatus">Kamera erişimi yalnızca tarayıcında işlenir, hiçbir görüntü sunucuya gönderilmez.</div>
     </div>
@@ -240,11 +235,11 @@
 
     <div class="hud" id="gestureBadge">
       <div id="gestureName">—</div>
-      <div id="gestureSub">iki parmağını birleştirerek çiz</div>
+      <div id="gestureSub">işaret parmağını göster, çiz</div>
     </div>
 
     <div id="legend">
-      <span><b>Sıkıştır (baş-işaret)</b> → çiz</span>
+      <span><b>İşaret parmağı</b> → çiz</span>
       <span><b>Açık avuç</b> → kalemi kaldır</span>
       <span><b>Yumruk</b> → tuvali temizle</span>
     </div>
@@ -268,7 +263,8 @@
 import {
   FaceLandmarker,
   HandLandmarker,
-  FilesetResolver
+  FilesetResolver,
+  DrawingUtils
 } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
 
 const gate = document.getElementById('gate');
@@ -282,6 +278,7 @@ const meshCanvas = document.getElementById('meshCanvas');
 const trailCanvas = document.getElementById('trailCanvas');
 const meshCtx = meshCanvas.getContext('2d');
 const trailCtx = trailCanvas.getContext('2d');
+const drawingUtils = new DrawingUtils(meshCtx);
 
 const fpsVal = document.getElementById('fpsVal');
 const faceCount = document.getElementById('faceCount');
@@ -295,7 +292,7 @@ let faceLandmarker, handLandmarker;
 let drawingEnabled = true;
 let meshEnabled = true;
 let currentColor = '#8fe3d1';
-let lastPinch = {left:null, right:null};
+let lastTip = {left:null, right:null};
 let lastFrameTime = performance.now();
 let fpsSmooth = 0;
 
@@ -329,7 +326,10 @@ startBtn.addEventListener('click', async ()=>{
   startBtn.disabled = true;
   gateStatus.textContent = 'Kamera izni isteniyor…';
   try{
-    const stream = await navigator.mediaDevices.getUserMedia({ video:{ width:960, height:720 }, audio:false });
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video:{ width:{ideal:1280}, height:{ideal:720}, frameRate:{ideal:60, max:60} },
+      audio:false
+    });
     video.srcObject = stream;
     await video.play();
 
@@ -360,6 +360,7 @@ async function initModels(){
       delegate:"GPU"
     },
     outputFaceBlendshapes:false,
+    outputFacialTransformationMatrixes:false,
     runningMode:"VIDEO",
     numFaces:1
   });
@@ -381,188 +382,172 @@ function resizeCanvases(){
 }
 window.addEventListener('resize', resizeCanvases);
 
-// Face mesh connection pairs (simplified oval + features, dot-graph style like reference art)
-const FACE_EDGES = [
-  // jaw/oval
-  [10,338],[338,297],[297,332],[332,284],[284,251],[251,389],[389,356],[356,454],
-  [454,323],[323,361],[361,288],[288,397],[397,365],[365,379],[379,378],[378,400],
-  [400,377],[377,152],[152,148],[148,176],[176,149],[149,150],[150,136],[136,172],
-  [172,58],[58,132],[132,93],[93,234],[234,127],[127,162],[162,21],[21,54],[54,103],
-  [103,67],[67,109],[109,10],
-  // brows
-  [70,63],[63,105],[105,66],[66,107],
-  [336,296],[296,334],[334,293],[293,300],
-  // eyes
-  [33,160],[160,158],[158,133],[133,153],[153,144],[144,33],
-  [362,385],[385,387],[387,263],[263,373],[373,380],[380,362],
-  // nose
-  [168,6],[6,197],[197,195],[195,5],[5,4],[4,45],[4,275],
-  // lips
-  [61,40],[40,37],[37,0],[0,267],[267,270],[270,291],[291,321],[321,405],[405,314],
-  [314,17],[17,84],[84,181],[181,91],[91,61]
-];
-const KEY_POINTS = [10,338,297,332,284,251,389,356,454,323,361,288,397,365,379,378,
-  400,377,152,148,176,149,150,136,172,58,132,93,234,127,162,21,54,103,67,109,
-  70,63,105,66,107,336,296,334,293,300,33,160,158,133,153,144,362,385,387,263,373,380,
-  168,6,197,195,5,4,45,275,61,40,37,0,267,270,291,321,405,314,17,84,181,91];
-
-const HAND_EDGES = [
-  [0,1],[1,2],[2,3],[3,4],
-  [0,5],[5,6],[6,7],[7,8],
-  [5,9],[9,10],[10,11],[11,12],
-  [9,13],[13,14],[14,15],[15,16],
-  [13,17],[17,18],[18,19],[19,20],
-  [0,17]
-];
-
-function drawFaceMesh(landmarks, w, h){
-  meshCtx.strokeStyle = 'rgba(143,227,209,0.55)';
-  meshCtx.lineWidth = 1;
-  meshCtx.beginPath();
-  FACE_EDGES.forEach(([a,b])=>{
-    const p1=landmarks[a], p2=landmarks[b];
-    if(!p1||!p2) return;
-    meshCtx.moveTo(p1.x*w, p1.y*h);
-    meshCtx.lineTo(p2.x*w, p2.y*h);
+// ---------- Modern mesh drawing (full tesselation, MediaPipe-accurate) ----------
+function drawFaceMesh(landmarks){
+  // fine dense tesselation — the "biometric scan" web
+  drawingUtils.drawConnectors(landmarks, FaceLandmarker.FACE_LANDMARKS_TESSELATION, {
+    color: 'rgba(143,227,209,0.22)', lineWidth: 0.6
   });
-  meshCtx.stroke();
+  // crisp bright contours on top: oval, brows, eyes, lips, iris
+  const contourSets = [
+    FaceLandmarker.FACE_LANDMARKS_FACE_OVAL,
+    FaceLandmarker.FACE_LANDMARKS_LEFT_EYEBROW,
+    FaceLandmarker.FACE_LANDMARKS_RIGHT_EYEBROW,
+    FaceLandmarker.FACE_LANDMARKS_LEFT_EYE,
+    FaceLandmarker.FACE_LANDMARKS_RIGHT_EYE,
+    FaceLandmarker.FACE_LANDMARKS_LIPS,
+  ];
+  contourSets.forEach(set=>{
+    drawingUtils.drawConnectors(landmarks, set, { color:'#bff5e8', lineWidth:1.4 });
+  });
+  drawingUtils.drawConnectors(landmarks, FaceLandmarker.FACE_LANDMARKS_LEFT_IRIS, { color:'#ffb020', lineWidth:1.4 });
+  drawingUtils.drawConnectors(landmarks, FaceLandmarker.FACE_LANDMARKS_RIGHT_IRIS, { color:'#ffb020', lineWidth:1.4 });
 
+  // key vertex dots along the oval + lips only (clean, not noisy)
   meshCtx.fillStyle = '#eafff8';
-  KEY_POINTS.forEach(i=>{
-    const p = landmarks[i];
-    if(!p) return;
+  meshCtx.shadowColor = '#8fe3d1';
+  meshCtx.shadowBlur = 4;
+  const w = meshCanvas.width, h = meshCanvas.height;
+  [FaceLandmarker.FACE_LANDMARKS_FACE_OVAL, FaceLandmarker.FACE_LANDMARKS_LIPS].forEach(set=>{
+    set.forEach(c=>{
+      const p = landmarks[c.start];
+      if(!p) return;
+      meshCtx.beginPath();
+      meshCtx.arc(p.x*w, p.y*h, 1.6, 0, Math.PI*2);
+      meshCtx.fill();
+    });
+  });
+  meshCtx.shadowBlur = 0;
+}
+
+function drawHand(landmarks, color, highlightTip){
+  drawingUtils.drawConnectors(landmarks, HandLandmarker.HAND_CONNECTIONS, {
+    color, lineWidth: 2.2
+  });
+  drawingUtils.drawLandmarks(landmarks, {
+    color, fillColor:color, radius: 2.8, lineWidth:1
+  });
+  if(highlightTip){
+    const w = meshCanvas.width, h = meshCanvas.height;
+    const p = landmarks[8];
+    meshCtx.save();
+    meshCtx.shadowColor = color;
+    meshCtx.shadowBlur = 20;
+    meshCtx.fillStyle = color;
     meshCtx.beginPath();
-    meshCtx.arc(p.x*w, p.y*h, 1.8, 0, Math.PI*2);
+    meshCtx.arc(p.x*w, p.y*h, 7, 0, Math.PI*2);
     meshCtx.fill();
-  });
+    meshCtx.restore();
+  }
 }
 
-function drawHand(landmarks, w, h, color){
-  meshCtx.strokeStyle = color;
-  meshCtx.lineWidth = 1.6;
-  meshCtx.beginPath();
-  HAND_EDGES.forEach(([a,b])=>{
-    const p1=landmarks[a], p2=landmarks[b];
-    meshCtx.moveTo(p1.x*w, p1.y*h);
-    meshCtx.lineTo(p2.x*w, p2.y*h);
-  });
-  meshCtx.stroke();
-  meshCtx.fillStyle = color;
-  landmarks.forEach(p=>{
-    meshCtx.beginPath();
-    meshCtx.arc(p.x*w, p.y*h, 2.6, 0, Math.PI*2);
-    meshCtx.fill();
-  });
+function dist(a,b){ return Math.hypot(a.x-b.x, a.y-b.y); }
+
+// finger extended = fingertip meaningfully farther from wrist than its pip joint
+function isExtended(lm, tip, pip){
+  return dist(lm[0], lm[tip]) > dist(lm[0], lm[pip]) * 1.15;
 }
 
-function dist(a,b){
-  return Math.hypot(a.x-b.x, a.y-b.y, (a.z||0)-(b.z||0));
-}
+function classifyGesture(lm){
+  const iEx = isExtended(lm,8,6);
+  const mEx = isExtended(lm,12,10);
+  const rEx = isExtended(lm,16,14);
+  const pEx = isExtended(lm,20,18);
 
-function classifyGesture(landmarks){
-  // tip indices: thumb 4, index 8, middle 12, ring 16, pinky 20
-  const pinchDist = dist(landmarks[4], landmarks[8]);
-  const wrist = landmarks[0];
-  const spread = dist(landmarks[8], landmarks[20]);
-  const fingersCurled = [8,12,16,20].every(tip=>{
-    const mcp = landmarks[tip-3];
-    return dist(landmarks[0], landmarks[tip]) < dist(landmarks[0], mcp) + 0.02;
-  });
-
-  if(pinchDist < 0.045) return 'pinch';
-  if(fingersCurled) return 'fist';
-  if(spread > 0.28) return 'open';
-  return 'point';
+  if(iEx && !mEx && !rEx && !pEx) return 'point';
+  if(!iEx && !mEx && !rEx && !pEx) return 'fist';
+  if(iEx && mEx && rEx && pEx) return 'open';
+  return 'other';
 }
 
 let lastDetectTime = -1;
 
-function loop(){
-  if(video.readyState >= 2 && faceLandmarker && handLandmarker){
-    const now = performance.now();
-    if(now !== lastDetectTime){
-      lastDetectTime = now;
+function loop(now){
+  // --- raw display fps, independent of detection cadence ---
+  const dt = now - lastFrameTime;
+  lastFrameTime = now;
+  const instFps = dt > 0 ? 1000/dt : fpsSmooth;
+  fpsSmooth = fpsSmooth ? fpsSmooth*0.85 + instFps*0.15 : instFps;
+  fpsVal.textContent = Math.min(60, Math.round(fpsSmooth));
 
-      const w = meshCanvas.width, h = meshCanvas.height;
-      meshCtx.clearRect(0,0,w,h);
+  if(video.readyState >= 2 && faceLandmarker && handLandmarker && now !== lastDetectTime){
+    lastDetectTime = now;
 
-      const faceResult = faceLandmarker.detectForVideo(video, now);
-      const handResult = handLandmarker.detectForVideo(video, now);
+    const w = meshCanvas.width, h = meshCanvas.height;
+    meshCtx.clearRect(0,0,w,h);
 
-      // face
-      let fCount = 0;
-      if(meshEnabled && faceResult.faceLandmarks && faceResult.faceLandmarks.length){
-        const lm = faceResult.faceLandmarks[0];
-        fCount = lm.length;
-        drawFaceMesh(lm, w, h);
-      }
-      faceCount.textContent = fCount;
+    const faceResult = faceLandmarker.detectForVideo(video, now);
+    const handResult = handLandmarker.detectForVideo(video, now);
 
-      // hands
-      let hCount = 0;
-      let activeGesture = '—';
-      if(handResult.landmarks && handResult.landmarks.length){
-        handResult.landmarks.forEach((lm, idx)=>{
-          hCount += lm.length;
-          const handedness = handResult.handedness[idx]?.[0]?.categoryName || 'Hand';
-          const color = handedness === 'Left' ? '#ffb020' : '#8fe3d1';
-          drawHand(lm, w, h, color);
-
-          const gesture = classifyGesture(lm);
-          const tip = lm[8]; // index fingertip
-          const screenX = tip.x * w;
-          const screenY = tip.y * h;
-
-          if(gesture === 'pinch'){
-            activeGesture = 'ÇİZİM (SIKIŞTIR)';
-            if(drawingEnabled){
-              const key = handedness;
-              const prev = lastPinch[key.toLowerCase()] || lastPinch[key === 'Left' ? 'left':'right'];
-              trailCtx.strokeStyle = currentColor;
-              trailCtx.shadowColor = currentColor;
-              trailCtx.shadowBlur = 12;
-              trailCtx.lineWidth = 4;
-              trailCtx.lineCap = 'round';
-              const prevPoint = handedness==='Left' ? lastPinch.left : lastPinch.right;
-              if(prevPoint){
-                trailCtx.beginPath();
-                trailCtx.moveTo(prevPoint.x, prevPoint.y);
-                trailCtx.lineTo(screenX, screenY);
-                trailCtx.stroke();
-              } else {
-                trailCtx.beginPath();
-                trailCtx.arc(screenX, screenY, 2, 0, Math.PI*2);
-                trailCtx.fillStyle = currentColor;
-                trailCtx.fill();
-              }
-              if(handedness==='Left') lastPinch.left = {x:screenX,y:screenY};
-              else lastPinch.right = {x:screenX,y:screenY};
-            }
-          } else if(gesture === 'fist'){
-            activeGesture = 'YUMRUK — TEMİZLE';
-            trailCtx.clearRect(0,0,trailCanvas.width, trailCanvas.height);
-            if(handedness==='Left') lastPinch.left = null; else lastPinch.right = null;
-          } else if(gesture === 'open'){
-            activeGesture = 'AÇIK AVUÇ — KALEM YUKARI';
-            if(handedness==='Left') lastPinch.left = null; else lastPinch.right = null;
-          } else {
-            if(handedness==='Left') lastPinch.left = null; else lastPinch.right = null;
-          }
-        });
-      } else {
-        lastPinch.left = null; lastPinch.right = null;
-      }
-      handCount.textContent = hCount;
-      gestureName.textContent = activeGesture;
-
-      // fps
-      const dt = now - lastFrameTime;
-      lastFrameTime = now;
-      const instFps = 1000/dt;
-      fpsSmooth = fpsSmooth ? fpsSmooth*0.9 + instFps*0.1 : instFps;
-      fpsVal.textContent = Math.round(fpsSmooth);
+    // face
+    let fCount = 0;
+    if(meshEnabled && faceResult.faceLandmarks && faceResult.faceLandmarks.length){
+      const lm = faceResult.faceLandmarks[0];
+      fCount = lm.length;
+      drawFaceMesh(lm);
     }
+    faceCount.textContent = fCount;
+
+    // hands
+    let hCount = 0;
+    let activeGesture = '—';
+    if(handResult.landmarks && handResult.landmarks.length){
+      handResult.landmarks.forEach((lm, idx)=>{
+        hCount += lm.length;
+        const handedness = handResult.handedness[idx]?.[0]?.categoryName || 'Hand';
+        const color = handedness === 'Left' ? '#ffb020' : '#8fe3d1';
+        const gesture = classifyGesture(lm);
+        const key = handedness === 'Left' ? 'left' : 'right';
+
+        drawHand(lm, color, gesture === 'point');
+
+        const tip = lm[8];
+        const screenX = tip.x * w;
+        const screenY = tip.y * h;
+
+        if(gesture === 'point'){
+          activeGesture = 'ÇİZİM (İŞARET PARMAĞI)';
+          if(drawingEnabled){
+            trailCtx.strokeStyle = currentColor;
+            trailCtx.shadowColor = currentColor;
+            trailCtx.shadowBlur = 14;
+            trailCtx.lineWidth = 5;
+            trailCtx.lineCap = 'round';
+            trailCtx.lineJoin = 'round';
+            const prev = lastTip[key];
+            if(prev){
+              trailCtx.beginPath();
+              trailCtx.moveTo(prev.x, prev.y);
+              trailCtx.lineTo(screenX, screenY);
+              trailCtx.stroke();
+            } else {
+              trailCtx.beginPath();
+              trailCtx.arc(screenX, screenY, 2.5, 0, Math.PI*2);
+              trailCtx.fillStyle = currentColor;
+              trailCtx.fill();
+            }
+            lastTip[key] = {x:screenX, y:screenY};
+          } else {
+            lastTip[key] = null;
+          }
+        } else if(gesture === 'fist'){
+          activeGesture = 'YUMRUK — TEMİZLE';
+          trailCtx.clearRect(0,0,trailCanvas.width, trailCanvas.height);
+          lastTip[key] = null;
+        } else if(gesture === 'open'){
+          activeGesture = 'AÇIK AVUÇ — KALEM YUKARI';
+          lastTip[key] = null;
+        } else {
+          lastTip[key] = null;
+        }
+      });
+    } else {
+      lastTip.left = null; lastTip.right = null;
+    }
+    handCount.textContent = hCount;
+    gestureName.textContent = activeGesture;
   }
+
   requestAnimationFrame(loop);
 }
 
